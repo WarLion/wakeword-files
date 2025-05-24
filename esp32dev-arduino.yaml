@@ -1,0 +1,292 @@
+substitutions:
+  name: <<device name>>
+  friendly_name: <<Friendly name>>
+  ota_password: "<<ota_pass>>"
+  key_encription: "<<Key>>"
+  i2s_lrclk_ws: GPIO23
+  i2s_bclk_sck: GPIO22
+  mic: GPIO13
+  spk: GPIO25
+  ledpin: GPIO32
+  numleds: "4"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    - light.turn_on:
+        id: led_light           
+        red: 0%
+        green: 50%
+        blue: 90%
+        brightness: 80%
+        effect: Slow Pulse
+
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  encryption:
+    key: ${key_encription}
+
+ota:
+  - platform: esphome
+    password: ${ota_password}
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  on_connect:
+    then:
+      - light.turn_on:
+          id: led_light
+          red: 0%
+          green: 100%
+          blue: 0%
+          brightness: 80%
+      - delay: 1s
+      - light.turn_off: led_light
+  on_disconnect: 
+    then:
+      - light.turn_on:
+          id: led_light
+          red: 100%
+          blue: 0%
+          green: 0%
+          brightness: 80%
+          effect: Fast Pulse
+
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "Assist-Oficina Fallback Hotspot"
+    password: "Zbqzm7cagcis"
+
+captive_portal:
+    
+i2s_audio:
+  - id: i2s_in
+    i2s_lrclk_pin: ${i2s_lrclk_ws} #WS 
+    i2s_bclk_pin: ${i2s_bclk_sck} #SCK
+
+microphone:
+  - platform: i2s_audio
+    adc_type: external
+    pdm: false
+    id: mic_i2s
+    channel: right
+    bits_per_sample: 32bit
+    i2s_audio_id: i2s_in
+    i2s_din_pin: ${mic}  #SD Pin from the INMP441 Microphone
+
+
+speaker:
+  - platform: i2s_audio
+    id: big_speaker
+    i2s_audio_id: i2s_in
+    dac_type: external
+    i2s_dout_pin: ${spk}   #  DIN Pin of the MAX98357A Audio Amplifier
+    channel: mono
+
+
+
+voice_assistant:
+  microphone: mic_i2s
+  id: va
+  noise_suppression_level: 2
+  auto_gain: 31dBFS
+  volume_multiplier: 4.0
+  use_wake_word: false
+  speaker: big_speaker
+  
+  on_timer_finished:
+    - switch.turn_on: timer_ringing
+    - wait_until:
+        - switch.is_off: timer_ringing
+
+
+  on_wake_word_detected: 
+    - light.turn_on:
+        id: led_light
+        
+  on_listening: 
+    - light.turn_on:
+        id: led_light
+        effect: "Scan Effect With Custom Values"
+        brightness: 95%
+        red: 2%
+        green: 13%
+        blue: 100%       
+  
+  on_stt_end:
+    - light.turn_on:
+        id: led_light
+        effect: "Slow Pulse"
+        brightness: 95%
+        red: 10%
+        green: 80%
+        blue: 10%
+        
+  on_error: 
+    - light.turn_on:
+        id: led_light
+        effect: "None"
+    - if:
+        condition:
+          switch.is_on: use_wake_word
+        then:
+
+          - switch.turn_off: use_wake_word
+          - delay: 1sec 
+          - switch.turn_on: use_wake_word      
+  
+  on_client_connected:
+    - if:
+        condition:
+          switch.is_on: use_wake_word
+        then:
+          - voice_assistant.start_continuous:
+
+  on_client_disconnected:
+    - if:
+        condition:
+          switch.is_on: use_wake_word
+        then:
+          - voice_assistant.stop:
+ 
+  on_end:
+    - if:
+        condition:
+          switch.is_off: use_wake_word
+        then:
+          - light.turn_on: 
+              id: led_light
+              blue: 0%
+              green: 80%
+              red: 80%
+              brightness: 80%
+              effect: slow Pulse 
+        else:
+          - light.turn_off:
+              id: led_light
+
+
+binary_sensor:
+  - platform: status
+    name: API Connection
+    id: api_connection
+    filters:
+      - delayed_on: 1s
+    on_press:
+      - if:
+          condition:
+            switch.is_on: use_wake_word
+          then:
+            - voice_assistant.start_continuous:
+    on_release:
+      - if:
+          condition:
+            switch.is_on: use_wake_word
+          then:
+            - voice_assistant.stop:
+
+  - platform: gpio
+    pin:
+      number: GPIO21
+      mode: INPUT_PULLUP
+      inverted: true
+    id: vol_up
+    on_press:
+      - switch.toggle: use_wake_word
+  - platform: gpio
+    pin:
+      number: GPIO19
+      mode: INPUT_PULLUP
+      inverted: true
+    id: vol_down
+    on_press:
+      - switch.toggle: use_wake_word    
+
+
+button:
+  - platform: restart
+    name: "Restart"
+    id: but_rest
+
+switch:
+  - platform: template
+    name: Use wake word
+    id: use_wake_word
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    on_turn_on:
+      - light.turn_off: led_light       
+      - lambda: id(va).set_use_wake_word(true);
+      - if:
+          condition:
+            not:
+              - voice_assistant.is_running
+          then:
+            - voice_assistant.start_continuous 
+    on_turn_off:
+      - voice_assistant.stop
+      - lambda: id(va).set_use_wake_word(false);    
+      - light.turn_on: 
+          id: led_light
+          blue: 0%
+          green: 80%
+          red: 80%
+          brightness: 80%
+          effect: Fast Pulse   
+
+  - platform: template
+    id: timer_ringing
+    name: "Timer Ringing"
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:     
+      - light.turn_off: 
+          id: led_light
+    on_turn_on:
+      - light.turn_on: 
+          id: led_light
+          blue: 0%
+          green: 80%
+          red: 80%
+          brightness: 80%  
+          effect: Scan Effect With Custom Values   
+
+light:
+  - platform: neopixelbus
+    id: led_light
+    type: grb
+    pin: ${ledpin}      # DIN pin of the LED Strip
+    num_leds: ${numleds}     # change the Number of LEDS accordign to your LED Strip.
+    name: "Light"
+    variant: ws2812x
+    default_transition_length: 0.5s   
+    effects:
+      - addressable_scan:
+          name: Scan Effect With Custom Values
+          move_interval: 150ms
+          scan_width: 2
+      - pulse:
+          name: "Slow Pulse"
+          transition_length: 250ms
+          update_interval: 250ms
+          min_brightness: 50%
+          max_brightness: 100%
+      - pulse:
+          name: "Fast Pulse"
+          transition_length: 100ms
+          update_interval: 100ms
+          min_brightness: 50%
+          max_brightness: 100%
