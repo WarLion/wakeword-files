@@ -1,0 +1,764 @@
+substitutions:
+  # Phases of the Voice AssistantGPIO8
+  # IDLE: The voice assistant is ready to be triggered by a wake-word
+  voice_assist_idle_phase_id: '1'
+  # LISTENING: The voice assistant is ready to listen to a voice command (after being triggered by the wake word)
+  voice_assist_listening_phase_id: '2'
+  # THINKING: The voice assistant is currently processing the command
+  voice_assist_thinking_phase_id: '3'
+  # REPLYING: The voice assistant is replying to the command
+  voice_assist_replying_phase_id: '4'
+  # NOT_READY: The voice assistant is not ready 
+  voice_assist_not_ready_phase_id: '10'
+  # ERROR: The voice assistant encountered an error
+  voice_assist_error_phase_id: '11'  
+  # MUTED: The voice assistant is muted and will not reply to a wake-word
+  voice_assist_muted_phase_id: '12'
+
+esphome:
+  name: asistente-oficina
+  friendly_name: asistente oficina
+  on_boot:
+    - priority: 375
+      then:
+        - script.execute: control_leds
+        # If after 10 minutes, the device is still initializing (It did not yet connect to Home Assistant), turn off the init_in_progress variable and run the script to refresh the LED status
+        - delay: 10min
+        - if:
+            condition:
+              lambda: return id(init_in_progress);
+            then:
+              - lambda: id(init_in_progress) = false;
+              - script.execute: control_leds
+
+esp32:
+  board: esp32-s3-devkitc-1
+  cpu_frequency: 240MHz
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    version: recommended
+    sdkconfig_options:
+      CONFIG_ESP32S3_DATA_CACHE_64KB: "y"
+      CONFIG_ESP32S3_DATA_CACHE_LINE_64B: "y"
+      CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB: "y"
+
+      CONFIG_SPIRAM_RODATA: "y"
+      CONFIG_SPIRAM_FETCH_INSTRUCTIONS: "y"
+
+      CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST: "y"
+      CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY: "y"
+
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
+      CONFIG_MBEDTLS_SSL_PROTO_TLS1_3: "y" 
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+  id: api_id
+  encryption:
+    key: "T15i5nnXt34zuu96/K2+vq+ebksy9ybLNi2/Oe9RR7A="
+  actions:
+    - action: start_va
+      then:
+        - voice_assistant.start
+    - action: stop_va
+      then:
+        - voice_assistant.stop
+  on_client_connected:
+    - script.execute: control_leds
+  on_client_disconnected:
+    - script.execute: control_leds
+
+ota:
+  - platform: esphome
+    password: "48e0a97ecb956d919c184a0bb26a6f14"
+
+wifi:
+  id: wifi_id
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  on_connect:
+    - lambda: id(improv_ble_in_progress) = false;
+    - script.execute: control_leds
+  on_disconnect:
+    - script.execute: control_leds
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+i2s_audio:
+  - id: i2s
+    i2s_lrclk_pin: GPIO05
+    i2s_bclk_pin: GPIO06
+  - id: i2s_in
+    i2s_lrclk_pin: GPIO09  #WS 
+    i2s_bclk_pin: GPIO08 #SCK
+
+microphone:
+  - platform: i2s_audio
+    id: mic_id
+    adc_type: external
+    i2s_din_pin: GPIO04 #SD
+    channel: left
+    i2s_audio_id: i2s_in
+
+speaker:
+  - platform: i2s_audio
+    id: speaker_id
+    i2s_audio_id: i2s
+    dac_type: external
+    i2s_dout_pin:   
+      number: GPIO07 #DIN Pin of the MAX98357A Audio Amplifier
+    sample_rate: 48000
+    buffer_duration: 100ms
+
+  - platform: mixer
+    id: mixer_speaker_id
+    output_speaker: speaker_id
+    source_speakers:
+      - id: announcement_spk_mixer_input
+      - id: media_spk_mixer_input
+
+  - platform: resampler
+    id: media_spk_resampling_input
+    output_speaker: media_spk_mixer_input
+  - platform: resampler
+    id: announcement_spk_resampling_input
+    output_speaker: announcement_spk_mixer_input
+
+media_player:
+  - platform: speaker
+    name: None
+    id: speaker_media_player_id
+    media_pipeline:
+        speaker: media_spk_resampling_input
+        num_channels: 1
+    announcement_pipeline:
+        speaker: announcement_spk_resampling_input
+        num_channels: 1
+    on_announcement:
+      - mixer_speaker.apply_ducking:
+          id: media_spk_mixer_input
+          decibel_reduction: 24
+          duration: 0.25s
+    on_state:
+      - delay: 0.7s
+      -  if:
+          condition:
+            and:
+              - not:
+                  voice_assistant.is_running:
+              - not:
+                  media_player.is_announcing:
+          then:
+            - mixer_speaker.apply_ducking:
+                id: media_spk_mixer_input
+                decibel_reduction: 0
+                duration: 1.5s
+    files:
+      - id: alarm_sound
+        file: alarm.flac # Placed in the yaml directory. Should be encoded with a 48000 Hz sample rate, mono or stereo audio, and 16 bits per sample.
+      - id: beep
+        file: r2d2d.flac
+ 
+voice_assistant:
+  id: va
+  microphone: mic_id
+  media_player: speaker_media_player_id
+  noise_suppression_level: 2.0
+  volume_multiplier: 2.0
+  auto_gain: 31dBFS
+
+  # When the voice assistant connects to HA:
+  # Set init_in_progress to false (Initialization is over).
+  # If the switch is on, start the voice assistant
+  on_client_connected:
+    - lambda: id(init_in_progress) = false; 
+    - if:
+        condition:
+          switch.is_on: voice_enabled
+        then:
+          - micro_wake_word.start
+          - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          - script.execute: control_leds
+        else:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+          - script.execute: control_leds
+
+  # When the voice assistant disconnects to HA: 
+  # Stop the voice assistant
+  on_client_disconnected:
+    - lambda: id(voice_assistant_phase) = ${voice_assist_not_ready_phase_id};  
+    - micro_wake_word.stop
+
+  on_listening:
+    # Reset flags
+    - lambda: |-
+        id(voice_assistant_phase) = ${voice_assist_listening_phase_id};
+        id(is_tts_active) = false;
+        id(question_flag) = false;
+    - script.execute: control_leds
+    # Microphone operation indicator (red led)
+    - switch.turn_on: wake_led
+    # Waiting for speech for 4 seconds, otherwise exit
+    - script.execute: listening_timeout
+
+  on_stt_vad_start:
+    # Turn off the script if speech is detected
+    - script.stop: listening_timeout
+    - script.execute: control_leds
+  on_stt_vad_end:
+    - switch.turn_off: wake_led
+    - lambda: id(voice_assistant_phase) = ${voice_assist_thinking_phase_id};
+    - script.execute: control_leds
+  on_stt_end:
+  # Event for HA with recognized speech
+  - homeassistant.event:
+      event: esphome.stt_text
+      data:
+        text: !lambda return x; 
+
+  on_tts_start: 
+    - lambda: id(voice_assistant_phase) = ${voice_assist_replying_phase_id};
+    - script.execute: activate_stop_word_once
+    # Finding a question mark at the end of a sentence.
+    - lambda: |-
+        bool is_question = false;
+        if (!x.empty() && x.back() == '?') {
+          is_question = true;
+        }
+        id(question_flag) = is_question;
+#    - logger.log:
+#        format: "question_flag: %d (0=false, 1=true)"
+#        args:
+#          - id(question_flag)
+
+  on_tts_end:
+    # Set the flag when the stage is reached
+    - lambda: |-
+        id(is_tts_active) = true;
+  on_timer_started:
+    - script.execute: control_leds
+  on_timer_cancelled:
+    - script.execute: control_leds
+  on_timer_finished:
+    then:
+      - switch.turn_on: timer_ringing
+  on_timer_updated:
+    - script.execute: control_leds
+  on_timer_tick:
+    - script.execute: control_leds
+  on_end:
+    # Additional check for microphone LED
+    - light.turn_off: status_led
+    - if:
+        condition:
+          - switch.is_on: wake_led
+        then:
+          - switch.turn_off: wake_led
+
+    - wait_until:
+        condition:
+          - media_player.is_announcing:
+        timeout: 0.5s
+
+    - wait_until:
+        not:
+          voice_assistant.is_running:
+    - delay: 0.5s
+     
+    # New start of the pipeline if the conditions are met
+    - if:
+        condition:
+          and:
+            - lambda: 'return !id(question_flag);'
+            - lambda: 'return id(is_tts_active);'
+        then:
+          - voice_assistant.start:
+        else: 
+          # Stop ducking audio.
+          - mixer_speaker.apply_ducking:
+              id: media_spk_mixer_input
+              decibel_reduction: 0
+              duration: 1.0s
+          - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+          - script.execute: control_leds
+
+  # When the voice assistant encounters an error: 
+  # Wait 1 second and set the correct phase (idle or muted depending on the state of the switch)
+  on_error:
+    - if:
+        condition:
+          lambda: return !id(init_in_progress);
+        then:
+          - lambda: id(voice_assistant_phase) = ${voice_assist_error_phase_id}; 
+          - script.execute: control_leds 
+          - delay: 1s
+          - if:
+              condition:
+                switch.is_on: voice_enabled
+              then:
+                - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+              else:
+                - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+
+micro_wake_word:
+  models:
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/okay_nabu_20241226.3/okay_nabu.json
+
+    - model: https://github.com/kahrendt/microWakeWord/releases/download/stop/stop.json
+      id: stop
+      internal: true
+  vad:
+    model: https://github.com/kahrendt/microWakeWord/releases/download/v2.1_models/vad.json
+  id: mww
+  stop_after_detection: false
+  on_wake_word_detected:
+    - if:
+        condition:
+          switch.is_on: timer_ringing
+        then:
+          - switch.turn_off: timer_ringing
+        else:
+          - if:
+              condition:
+                switch.is_on: voice_enabled
+              then:
+                - if:
+                    condition:
+                      voice_assistant.is_running:
+                    then:
+                      voice_assistant.stop:
+                    # Stop any other media player announcement
+                    else:
+                      - if:
+                          condition:
+                            media_player.is_announcing:
+                          then:
+                            - media_player.stop:
+                                announcement: true
+                          # Start the voice assistant and play the wake sound, if enabled
+                          else:
+                            - media_player.speaker.play_on_device_media_file:
+                                media_file: beep
+                                announcement: true
+                            - delay: 300ms
+                            - voice_assistant.start:
+                                wake_word: !lambda return wake_word;
+
+globals:
+  # Global initialisation variable. Initialized to true and set to false once everything is connected. Only used to have a smooth "plugging" experience
+  - id: init_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  # Global variable storing the state of ImprovBLE. Used to draw different LED animations
+  - id: improv_ble_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Global variable tracking the phase of the voice assistant (defined above). Initialized to not_ready
+  - id: voice_assistant_phase
+    type: int
+    restore_value: no
+    initial_value: ${voice_assist_not_ready_phase_id}
+  # Variable for tracking TTS triggering 
+  - id: is_tts_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Variable for tracking built-in continued conversations 
+  - id: question_flag
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # Global variable storing if a timer is active
+  - id: is_timer_active
+    type: bool
+    restore_value: no
+
+button:
+  - platform: restart
+    name: reboot
+    
+script:
+  - id: control_leds
+    then:
+      - lambda: |
+          id(check_if_timers_active).execute();
+          if (id(improv_ble_in_progress)) {
+            id(control_leds_improv_ble_state).execute();
+          } else if (id(init_in_progress)) {
+            id(control_leds_init_state).execute();
+          } else if (!id(wifi_id).is_connected() || !id(api_id).is_connected()){
+            id(control_leds_no_ha_connection_state).execute();
+          } else if (id(timer_ringing).state) {
+            id(control_leds_timer_ringing).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_listening_phase_id}) {
+            id(control_leds_voice_assistant_waiting_for_command_phase).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_thinking_phase_id}) {
+            id(control_leds_voice_assistant_listening_for_command_phase).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_thinking_phase_id}) {
+            id(control_leds_voice_assistant_thinking_phase).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_replying_phase_id}) {
+            id(control_leds_voice_assistant_replying_phase).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_error_phase_id}) {
+            id(control_leds_voice_assistant_error_phase).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_not_ready_phase_id}) {
+            id(control_leds_voice_assistant_not_ready_phase).execute();
+          } else if (id(is_timer_active)) {
+            id(control_leds_timer_ticking).execute();
+          } else if (id(voice_assistant_phase) == ${voice_assist_idle_phase_id}) {
+            id(control_leds_voice_assistant_idle_phase).execute();
+          }
+  # Script executed during Improv BLE
+  # Warm White slow pulse
+  - id: control_leds_improv_ble_state
+    then:
+      - light.turn_on:
+          brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+          red: 100%
+          green: 89%
+          blue: 71%
+          id: status_led
+          effect: "Slow Pulse"
+
+  # Script executed during initialization
+  # Fast Blue pulse if Wifi is connected, Else slow blue pulse
+  - id: control_leds_init_state
+    then:
+      - if:
+          condition:
+            wifi.connected:
+          then:
+            - light.turn_on:
+                brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+                red: 9%
+                green: 73%
+                blue: 95%
+                id: status_led
+                effect: "Fast Pulse"
+          else:
+            - light.turn_on:
+                brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+                red: 9%
+                green: 73%
+                blue: 95%
+                id: status_led
+                effect: "Slow Pulse"
+  # Script executed when the device has no connection to Home Assistant
+  # Red slow pulse (This will be visible during HA updates for example)
+  - id: control_leds_no_ha_connection_state
+    then:
+      - light.turn_on:
+          brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+          red: 1
+          green: 0
+          blue: 0
+          id: status_led
+          effect: "Slow Pulse"
+
+  # Script executed when the voice assistant is idle (waiting for a wake word)
+  # Nothing
+  - id: control_leds_voice_assistant_idle_phase
+    then:
+      - light.turn_off: status_led
+      - if:
+          condition:
+            light.is_on: status_led
+          then:
+            light.turn_off: status_led
+
+  # Script executed when the voice assistant is waiting for a command (After the wake word)
+  # Slow purple pulse
+  - id: control_leds_voice_assistant_waiting_for_command_phase
+    then:
+      - light.turn_on:
+          brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+          red: 1
+          green: 0.2
+          blue: 1
+          id: status_led
+          effect: "Slow Pulse"
+
+  # Script executed when the voice assistant is listening to a command
+  # Slow purple pulse
+  - id: control_leds_voice_assistant_listening_for_command_phase
+    then:
+      - light.turn_on:
+          brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+          red: 1
+          green: 0.2
+          blue: 1
+          id: status_led
+          effect: "Slow Pulse"
+
+  # Script executed when the voice assistant is thinking to a command
+  # Fast purple pulse
+  - id: control_leds_voice_assistant_thinking_phase
+    then:
+      - light.turn_on:
+          brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+          red: 1
+          green: 0.2
+          blue: 1
+          id: status_led
+          effect: "Fast Pulse"
+
+  # Script executed when the voice assistant is replying to a command
+  # Slow cyan pulse
+  - id: control_leds_voice_assistant_replying_phase
+    then:
+      - light.turn_on:
+          brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+          red: 0.2
+          green: 1
+          blue: 1
+          id: status_led
+          effect: "Slow Pulse"
+
+  # Script executed when the voice assistant is in error
+  # Fast Red Pulse
+  - id: control_leds_voice_assistant_error_phase
+    then:
+      - light.turn_on:
+          brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+          red: 1
+          green: 0
+          blue: 0
+          id: status_led
+          effect: "Fast Pulse"
+
+  # Script executed when the voice assistant is not ready
+  - id: control_leds_voice_assistant_not_ready_phase
+    then:
+      - light.turn_on:
+          brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+          red: 1
+          green: 0
+          blue: 0
+          id: status_led
+          effect: "Slow Pulse"
+
+  # Script executed when the center button is touched
+  # The LED turns on blue
+  - id: control_leds_center_button_touched
+    then:
+      - light.turn_on:
+          brightness: !lambda return min ( max( id(status_led).current_values.get_brightness() , 0.2f ) + 0.1f , 1.0f );
+          red: 0
+          green: 0
+          blue: 1
+          id: status_led
+          effect: "None"
+
+  # Script executed when the timer is ringing, to control the LEDs
+  # The LED blinks green.
+  - id: control_leds_timer_ringing
+    then:
+      - light.turn_on:
+          brightness: !lambda return min ( max( id(status_led).current_values.get_brightness() , 0.2f ) + 0.1f , 1.0f );
+          red: 0
+          green: 1
+          blue: 0
+          id: status_led
+          effect: "Fast Pulse"
+
+  # Script executed when the timer is ticking, to control the LEDs
+  # Slow dim while pulse.
+  - id: control_leds_timer_ticking
+    then:
+      - light.turn_on:
+          brightness: !lambda return max( id(status_led).current_values.get_brightness() , 0.2f );
+          red: 0.3
+          green: 0.3
+          blue: 0.3
+          id: status_led
+          effect: "Slow Pulse"
+  
+  # Script executed when the alarm is active
+  # The LED turns on dim green
+  - id: control_leds_alarm_active
+    then:
+      - light.turn_on:
+          brightness: !lambda return 0.3f;
+          red: 0
+          green: 1
+          blue: 0
+          id: status_led
+          effect: "None"
+
+  - id: listening_timeout
+    mode: restart 
+    then:
+      - delay: 4s
+      - if:
+          condition:
+            lambda: |-
+              return id(voice_assistant_phase) == 2;
+          then:
+            - switch.turn_off: wake_led
+            - voice_assistant.stop:
+            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+  - id: activate_stop_word_once
+    then:
+      - delay: 1s
+      # Enable stop wake word
+      - if:
+          condition:
+            switch.is_off: timer_ringing
+          then:
+            - micro_wake_word.enable_model: stop
+            - wait_until:
+                not:
+                  media_player.is_announcing:
+            - if:
+                condition:
+                  switch.is_off: timer_ringing
+                then:
+                  - micro_wake_word.disable_model: stop
+          
+  # Script used to check if a timer is active (Stored in global is_timer_active)
+  - id: check_if_timers_active
+    then:
+      - lambda: |
+          const auto timers = id(va).get_timers();
+          bool output = false;
+          if (timers.size() > 0) {
+            for (auto &iterable_timer : timers) {
+              if(iterable_timer.second.is_active) {
+                output = true;
+              }
+            }
+          }
+          id(is_timer_active) = output;
+
+binary_sensor:
+  - platform: gpio
+    id: center_button
+    pin:
+      number: GPIO13
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 20ms
+    on_click:
+      then:
+        - switch.toggle: voice_enabled
+switch:
+  - platform: gpio
+    pin: GPIO21
+    id: wake_led
+    name: "Rec"
+  - platform: template
+    name: Enable Voice Assistant
+    id: voice_enabled
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    icon: mdi:assistant
+    # When the switch is turned on (on Home Assistant):
+    # Start the voice assistant component
+    on_turn_on:
+      - if:
+          condition:
+            lambda: return !id(init_in_progress);
+          then:      
+            - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
+            - if:
+                condition:
+                  not:
+                    - voice_assistant.is_running
+                then:
+                  - micro_wake_word.start
+    # When the switch is turned off (on Home Assistant):
+    # Stop the voice assistant component
+    on_turn_off:
+      - if:
+          condition:
+            lambda: return !id(init_in_progress);
+          then:      
+            - voice_assistant.stop
+            - micro_wake_word.stop
+            - lambda: id(voice_assistant_phase) = ${voice_assist_muted_phase_id};
+  - platform: template
+    name: "Ring Timer"
+    id: timer_ringing
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    on_turn_off:
+        # Stop playing the alarm
+        - media_player.stop:
+            announcement: true
+        - script.execute: control_leds
+    on_turn_on:
+        - while:
+            condition:
+                switch.is_on: timer_ringing
+            then:
+                # Play the alarm sound as an announcement
+                - media_player.speaker.play_on_device_media_file:
+                    media_file: alarm_sound
+                    announcement: true
+                # Wait until the alarm sound starts playing
+                - wait_until:
+                    media_player.is_announcing:
+                # Wait until the alarm sound stops playing
+                - wait_until:
+                    not:
+                      media_player.is_announcing:
+                - script.execute: control_leds
+                - delay: 1000ms
+
+
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    name: "Status LED"
+    chipset: WS2812
+    pin: GPIO10
+    num_leds: 4
+    rgb_order: GRB
+    restore_mode: ALWAYS_OFF      
+    effects:
+        - pulse:
+            name: "Slow Pulse"
+            transition_length: 250ms
+            update_interval: 250ms
+            min_brightness: 50%
+            max_brightness: 100%
+        - pulse:
+            name: "Fast Pulse"
+            transition_length: 100ms
+            update_interval: 100ms
+            min_brightness: 50%
+            max_brightness: 100%
+        - addressable_scan:
+            name: "Scan"
+            move_interval: 50ms
+            scan_width: 2
+        - addressable_lambda:
+            name: Volume Level Display
+            update_interval: 500ms
+            lambda: |-
+              float volume = id(speaker_media_player_id).volume;
+              int num_leds_on = round(volume * 4);
+              for (int i = 0; i < it.size(); i++) {
+                if (i < num_leds_on) {
+                  it[i] = Color(0, 0, 255); // Blue
+                } else {
+                  it[i] = Color::BLACK;
+                }
+              }  
+        - pulse:  # ❌ This is misaligned. It's outside the 'effects:' block.
+            name: "Timer Alert"
+            transition_length: 500ms
+            update_interval: 500ms
+            min_brightness: 50%
+            max_brightness: 100%   
