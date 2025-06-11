@@ -18,10 +18,10 @@ substitutions:
   voice_assist_muted_phase_id: '12'
 
   hidden_ssid: "false"
-  name: asistente-oficina
-  friendly_name: asistente oficina
-  ota_password: "48e0a97ecb956d919c184a0bb26a6f14"
-  key_encryption: "T15i5nnXt34zuu96/K2+vq+ebksy9ybLNi2/Oe9RR7A="
+  name: Voice-Assistant
+  friendly_name: Voice assistant
+  ota_password: "Your_Ota_Password"
+  key_encryption: "Your_Key"
   i2s_lrclk: GPIO05
   i2s_bclk: GPIO06
   i2s_ws: GPIO09
@@ -672,10 +672,14 @@ i2s_audio:
 microphone:
   - platform: i2s_audio
     id: i2s_mics
-    adc_type: external
     i2s_din_pin: ${mic}
-    channel: left
+    adc_type: external
+    pdm: false
+    sample_rate: 16000
+    bits_per_sample: 32bit
+    i2s_mode: primary
     i2s_audio_id: i2s_input
+    channel: left
       
 speaker:
   # Hardware speaker output
@@ -846,6 +850,7 @@ voice_assistant:
   microphone:
     microphone: i2s_mics
     channels: 0
+    gain_factor: 4
   media_player: external_media_player
   micro_wake_word: mww
   use_wake_word: false
