@@ -1,0 +1,14 @@
+{
+  "type": "micro",
+  "wake_word": "wallie",
+  "model": "wall-e.tflite",
+  "trained_languages": ["en","es"],
+  "version": 1,
+  "micro": {
+    "probability_cutoff": 0.85,
+    "feature_step_size": 10,
+    "sliding_window_size": 5,
+    "tensor_arena_size": 37000,
+    "minimum_esphome_version": "2025.5.0"
+  }
+}
