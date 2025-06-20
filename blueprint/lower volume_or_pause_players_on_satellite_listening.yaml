@@ -1,0 +1,97 @@
+blueprint:
+  name: lower volume or pause players on satellite listening
+  description: >
+    Temporarily lowers the volume or pauses media players in the same area when
+    any selected Assist Satellite starts listening, then restores their state after
+    the interaction ends.
+  domain: automation
+  input:
+    satellites:
+      name: Assist Satellites
+      description: List of Assist Satellite entities to monitor.
+      selector:
+        entity:
+          domain: assist_satellite
+          multiple: true
+    duck_volume:
+      name: Duck Volume Level
+      description: Volume level to set while assist is listening (used if ducking is selected).
+      default: 0.2
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.01
+          unit_of_measurement: fraction (0–1)
+          mode: slider
+    action_type:
+      name: Action Type
+      description: Choose whether to lower volume or pause the media players.
+      default: volume
+      selector:
+        select:
+          options:
+            - volume
+            - pause
+trigger:
+  - platform: state
+    entity_id: !input satellites
+    to: listening
+
+variables:
+  v_duck_volume: !input duck_volume
+  v_action_type: !input action_type
+  v_players: >
+    {{ states.media_player
+      | selectattr('state', 'equalto', 'playing')
+      | selectattr('entity_id', 'in', area_entities(area_id(trigger.entity_id)))
+      | rejectattr('entity_id', 'in', device_entities(device_id(trigger.entity_id)))
+      | rejectattr('attributes.active_queue', 'in', device_entities(device_id(trigger.entity_id)))
+      | map(attribute='entity_id')
+      | list
+    }}
+  v_volumes: >
+    {% set vol = namespace(umes = []) %}
+    {% for i in v_players %}
+      {% set vol.umes = vol.umes + [{'id': i, 'volume_diff': state_attr(i, 'volume_level') - v_duck_volume }] %}
+    {% endfor %}
+    {{ vol.umes }}
+
+action:
+  - choose:
+      - conditions: "{{ v_action_type == 'volume' }}"
+        sequence:
+          - service: media_player.volume_set
+            data:
+              volume_level: "{{ v_duck_volume }}"
+            target:
+              entity_id: "{{ v_players }}"
+      - conditions: "{{ v_action_type == 'pause' }}"
+        sequence:
+          - service: media_player.media_pause
+            target:
+              entity_id: "{{ v_players }}"
+  - wait_for_trigger:
+      - platform: template
+        value_template: "{{ is_state(trigger.entity_id, 'idle') }}"
+    timeout: "00:03:00"
+  - choose:
+      - conditions: "{{ v_action_type == 'volume' }}"
+        sequence:
+          - repeat:
+              for_each: "{{ v_volumes }}"
+              sequence:
+                - service: media_player.volume_set
+                  data:
+                    volume_level: >
+                      {{ state_attr(repeat.item.id, 'volume_level') + repeat.item.volume_diff }}
+                  target:
+                    entity_id: "{{ repeat.item.id }}"
+      - conditions: "{{ v_action_type == 'pause' }}"
+        sequence:
+          - service: media_player.media_play
+            target:
+              entity_id: "{{ v_players }}"
+
+mode: parallel
+max: 10
